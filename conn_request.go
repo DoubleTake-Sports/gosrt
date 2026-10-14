@@ -437,6 +437,7 @@ func (req *connRequest) Accept() (Conn, error) {
 		socketId:                    req.socketId,
 		peerSocketId:                req.peerSocketId,
 		tsbpdTimeBase:               uint64(req.timestamp),
+		tsbpdStartCorrection:        tsbpdStartCorrection(0, req.timestamp),
 		tsbpdDelay:                  uint64(recvTsbpdDelay) * 1000,
 		peerTsbpdDelay:              uint64(sendTsbpdDelay) * 1000,
 		initialPacketSequenceNumber: req.handshake.InitialPacketSequenceNumber,
