@@ -174,7 +174,8 @@ type srtConn struct {
 	tsbpdWrapPeriod     bool
 	tsbpdTimeBaseOffset uint64 // microseconds
 	tsbpdDelay          uint64 // microseconds
-	tsbpdDrift          uint64 // microseconds
+	tsbpdShift          int64  // microseconds, where the peer's clock starts on ours
+	drift               *driftTracer
 	peerTsbpdDelay      uint64 // microseconds
 	dropThreshold       uint64 // microseconds
 
@@ -228,6 +229,7 @@ type srtConnConfig struct {
 	socketId                    uint32
 	peerSocketId                uint32
 	tsbpdTimeBase               uint64 // microseconds
+	tsbpdStartCorrection        int64  // microseconds
 	tsbpdDelay                  uint64 // microseconds
 	peerTsbpdDelay              uint64 // microseconds
 	initialPacketSequenceNumber circular.Number
@@ -249,6 +251,8 @@ func newSRTConn(config srtConnConfig) *srtConn {
 		socketId:                    config.socketId,
 		peerSocketId:                config.peerSocketId,
 		tsbpdTimeBase:               config.tsbpdTimeBase,
+		tsbpdShift:                  config.tsbpdStartCorrection,
+		drift:                       newDriftTracer(),
 		tsbpdDelay:                  config.tsbpdDelay,
 		peerTsbpdDelay:              config.peerTsbpdDelay,
 		initialPacketSequenceNumber: config.initialPacketSequenceNumber,
@@ -715,7 +719,7 @@ func (c *srtConn) handlePacket(p packet.Packet) {
 		}
 	}
 
-	header.PktTsbpdTime = c.tsbpdTimeBase + tsbpdTimeBaseOffset + uint64(header.Timestamp) + c.tsbpdDelay + c.tsbpdDrift
+	header.PktTsbpdTime = tsbpdReleaseTime(c.tsbpdTimeBase+tsbpdTimeBaseOffset+uint64(header.Timestamp), c.tsbpdDelay, c.tsbpdShift+c.drift.shift, c.drift.drift)
 
 	c.log("data:recv:dump", func() string { return p.Dump() })
 
@@ -841,7 +845,11 @@ func (c *srtConn) handleACKACK(p packet.Packet) {
 	// p.typeSpecific is the ACKNumber
 	if ts, ok := c.ackNumbers[p.Header().TypeSpecific]; ok {
 		// 4.10.  Round-Trip Time Estimation
-		c.recalculateRTT(time.Since(ts))
+		rtt := time.Since(ts)
+		c.recalculateRTT(rtt)
+		if c.config.DriftTracer {
+			c.addDriftSample(p.Header().Timestamp, rtt)
+		}
 		delete(c.ackNumbers, p.Header().TypeSpecific)
 	} else {
 		c.log("control:recv:ACKACK:error", func() string { return fmt.Sprintf("got unknown ACKACK (%d)", p.Header().TypeSpecific) })
@@ -859,6 +867,17 @@ func (c *srtConn) handleACKACK(p packet.Packet) {
 	c.ackLock.Unlock()
 
 	c.recv.SetNAKInterval(uint64(c.rtt.NAKInterval()))
+}
+
+// addDriftSample compares the peer's clock with ours on each full ACK exchange (libsrt: CTsbpdTime::addDriftSample)
+func (c *srtConn) addDriftSample(peerTimestamp uint32, rtt time.Duration) {
+	arrived := time.Since(c.start).Microseconds()
+	sent := unwrapTimestamp(peerTimestamp, c.tsbpdTimeBaseOffset, c.tsbpdWrapPeriod)
+	if c.drift.add(arrived-int64(sent)-c.tsbpdShift-c.drift.shift, rtt.Microseconds()) {
+		c.log("connection:tsbpd", func() string {
+			return fmt.Sprintf("drift %dus, base moved %dus", c.drift.drift, c.drift.shift)
+		})
+	}
 }
 
 // recalculateRTT recalculates the RTT based on a full ACK exchange

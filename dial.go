@@ -318,6 +318,9 @@ func (dl *dialer) send(p packet.Packet) {
 }
 
 func (dl *dialer) handleHandshake(p packet.Packet) {
+	arrived := time.Since(dl.start).Microseconds()
+	peerTimestamp := p.Header().Timestamp
+
 	cif := &packet.CIFHandshake{}
 
 	err := p.UnmarshalCIF(cif)
@@ -544,6 +547,7 @@ func (dl *dialer) handleHandshake(p packet.Packet) {
 			socketId:                    dl.socketId,
 			peerSocketId:                cif.SRTSocketId,
 			tsbpdTimeBase:               uint64(time.Since(dl.start).Microseconds()),
+			tsbpdStartCorrection:        tsbpdStartCorrection(arrived, peerTimestamp),
 			tsbpdDelay:                  uint64(recvTsbpdDelay) * 1000,
 			peerTsbpdDelay:              uint64(sendTsbpdDelay) * 1000,
 			initialPacketSequenceNumber: cif.InitialPacketSequenceNumber,
